@@ -5,7 +5,7 @@
  * összes ES modul, ikon, manifest), így az első betöltés után internetkapcsolat
  * nélkül (repülőgépes módban is) 100%-ban működik iPaden.
  */
-const CACHE_NAME = 'mancs-mentoakcio-cache-v2';
+const CACHE_NAME = 'mancs-mentoakcio-cache-v3';
 
 const APP_SHELL = [
   './',
@@ -60,7 +60,9 @@ self.addEventListener('install', (event) => {
   event.waitUntil(
     caches
       .open(CACHE_NAME)
-      .then((cache) => cache.addAll(APP_SHELL))
+      .then((cache) =>
+        Promise.allSettled(APP_SHELL.map((url) => cache.add(url))),
+      )
       .then(() => self.skipWaiting()),
   );
 });
@@ -81,6 +83,21 @@ self.addEventListener('activate', (event) => {
 self.addEventListener('fetch', (event) => {
   const { request } = event;
   if (request.method !== 'GET') return;
+
+  // Az oldal (HTML) mindig a hálózatról frissül, így nem ragad be régi verzió;
+  // offline állapotban a gyorsítótárból jön.
+  if (request.mode === 'navigate') {
+    event.respondWith(
+      fetch(request)
+        .then((response) => {
+          const copy = response.clone();
+          caches.open(CACHE_NAME).then((cache) => cache.put('./index.html', copy));
+          return response;
+        })
+        .catch(() => caches.match('./index.html')),
+    );
+    return;
+  }
 
   event.respondWith(
     caches.match(request).then((cached) => {
