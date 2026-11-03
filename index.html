@@ -2012,6 +2012,8 @@ let huVoice = null;
 let timers = [];
 let lastSpoken = null; // { say, show, audioKey, onEnd }
 let currentUtterance = null;
+let speechEverStarted = false;
+let pendingRetry = null;
 let activeBufferHandle = null;
 let captionEl = null;
 let captionHideTimer = null;
@@ -2042,14 +2044,28 @@ function hasHungarianVoice() {
   return !!huVoice;
 }
 
-/** iOS feloldás: az első felhasználói gesztus alatt egy néma "beszéd". */
+/**
+ * iOS feloldás: a speechSynthesis csak megfelelő felhasználói gesztus (touchend / click /
+ * pointerup) alatt indított beszéddel oldódik fel – a pointerdown iPaden ehhez nem elég.
+ * Ezért minden ilyen eseménynél újrapróbáljuk, amíg egy valódi beszéd el nem indult.
+ * Ha addig már várakozott egy mondat (pl. az üdvözlés), azt most elindítjuk.
+ */
 function unlockSpeech() {
-  if (!synth) return;
+  if (!synth || speechEverStarted) return;
   try {
-    const u = new SpeechSynthesisUtterance(' ');
-    u.volume = 0;
-    u.lang = SPEECH_SETTINGS.lang;
-    synth.speak(u);
+    synth.resume();
+    if (pendingRetry) {
+      const retry = pendingRetry;
+      pendingRetry = null;
+      retry();
+      return;
+    }
+    if (!synth.speaking && !synth.pending) {
+      const u = new SpeechSynthesisUtterance('.');
+      u.volume = 0;
+      u.lang = SPEECH_SETTINGS.lang;
+      synth.speak(u);
+    }
   } catch {
     /* nem kritikus */
   }
@@ -2089,6 +2105,11 @@ function findVoiceBufferKey(say, show, explicitKey) {
  * @param {{ remember?: boolean }} [options]
  */
 function speakHu(text, onEnd, options = {}) {
+  if (!text) {
+    // Hiányzó szöveg esetén ne akadjon el a játék
+    if (onEnd) window.setTimeout(onEnd, 0);
+    return;
+  }
   const { remember = true } = options;
   const say = typeof text === 'string' ? text : text.say;
   const show = typeof text === 'string' ? text : text.show ?? text.say;
@@ -2150,24 +2171,43 @@ function speakHu(text, onEnd, options = {}) {
 
   later(() => {
     if (myGen !== gen) return;
-    try {
-      const u = new SpeechSynthesisUtterance(say);
-      u.lang = SPEECH_SETTINGS.lang;
-      if (huVoice) u.voice = huVoice;
-      u.pitch = SPEECH_SETTINGS.pitch;
-      u.rate = SPEECH_SETTINGS.rate;
-      u.volume = SPEECH_SETTINGS.volume;
-      u.onstart = () => {
-        started = true;
-      };
-      u.onend = finish;
-      u.onerror = finish;
-      currentUtterance = u;
-      synth.speak(u);
-    } catch {
-      later(finish, estimateSilentMs(say));
-    }
+    const speakNow = () => {
+      if (myGen !== gen || finished) return;
+      try {
+        // Ha a hang még nem ismert (iOS lazán tölti), újra megpróbáljuk kiválasztani
+        if (!huVoice) pickVoice();
+        const u = new SpeechSynthesisUtterance(say);
+        u.lang = SPEECH_SETTINGS.lang;
+        if (huVoice) u.voice = huVoice;
+        u.pitch = SPEECH_SETTINGS.pitch;
+        u.rate = SPEECH_SETTINGS.rate;
+        u.volume = SPEECH_SETTINGS.volume;
+        u.onstart = () => {
+          started = true;
+          speechEverStarted = true;
+          pendingRetry = null;
+        };
+        u.onend = finish;
+        u.onerror = finish;
+        currentUtterance = u;
+        synth.resume();
+        synth.speak(u);
+      } catch {
+        later(finish, estimateSilentMs(say));
+      }
+    };
+    // Ha még nem volt sikeres beszéd, az első érintés-gesztusnál újra megpróbáljuk
+    if (!speechEverStarted) pendingRetry = () => { cancelPendingSynth(); speakNow(); };
+    speakNow();
   }, 60);
+}
+
+function cancelPendingSynth() {
+  try {
+    synth.cancel();
+  } catch {
+    /* ignore */
+  }
 }
 
 function cancelInternal() {
@@ -3315,12 +3355,16 @@ initStage(document.getElementById('stage'));
 initSpeech({ captionElement: document.getElementById('caption') });
 initStateMachine(document.getElementById('screen-host'));
 
-// Az első pointerdown feloldja az AudioContext-et és a speechSynthesis-t (iOS),
-// valamint előtölti a saját hangfájlokat (ha vannak megadva az AUDIO_MANIFEST-ben).
-window.addEventListener('pointerdown', () => {
+// Az első érintésnél feloldja az AudioContext-et és a speechSynthesis-t (iOS).
+// iPaden a beszéd csak touchend/click/pointerup gesztusnál oldódik fel, ezért
+// többféle eseményre is figyelünk (az unlockSpeech addig újrapróbál, amíg sikerül).
+const unlockMedia = () => {
   unlockAudio();
   unlockSpeech();
-}, { capture: true, once: true });
+};
+['pointerdown', 'pointerup', 'touchend', 'click'].forEach((type) => {
+  window.addEventListener(type, unlockMedia, { capture: true, passive: true });
+});
 
 // 8 kutyus × 2 küldetés = 16 változatos mentőakció a pakliban
 const missionDeck = createDeck(getAllMissions());
@@ -4622,16 +4666,16 @@ const actionScreen = {
   });
   __define('screens/care.js', function (__exports, __require) {
 /**
- * CARE – "Kutyus-gondozó és Etető" játékmód.
+ * CARE â€“ "Kutyus-gondozĂł Ă©s EtetĹ‘" jĂˇtĂ©kmĂłd.
  *
- * 3 játékos lépés:
- *  1. Választás: 3 sáros kutyus közül kiválasztjuk, kit szeretnénk megfürdetni.
- *  2. Fürdetés:
- *     - 2a. Szappanozás: a habos szivaccsal átdörzsöljük a kutyust, a sárfoltok
- *       eltűnnek és habbuborékok nőnek rajta.
- *     - 2b. Öblítés: a zuhanyrózsával leöblítjük a habot, míg csillogóan tiszta lesz.
- *  3. Etetés: 2 finom jutalomfalatot húzunk (vagy koppintunk) a kutyus szájához.
- *     A végén átlépünk a REWARD képernyőre (+1 arany jutalomcsont!).
+ * 3 jĂˇtĂ©kos lĂ©pĂ©s:
+ *  1. VĂˇlasztĂˇs: 3 sĂˇros kutyus kĂ¶zĂĽl kivĂˇlasztjuk, kit szeretnĂ©nk megfĂĽrdetni.
+ *  2. FĂĽrdetĂ©s:
+ *     - 2a. SzappanozĂˇs: a habos szivaccsal ĂˇtdĂ¶rzsĂ¶ljĂĽk a kutyust, a sĂˇrfoltok
+ *       eltĹ±nnek Ă©s habbuborĂ©kok nĹ‘nek rajta.
+ *     - 2b. Ă–blĂ­tĂ©s: a zuhanyrĂłzsĂˇval leĂ¶blĂ­tjĂĽk a habot, mĂ­g csillogĂłan tiszta lesz.
+ *  3. EtetĂ©s: 2 finom jutalomfalatot hĂşzunk (vagy koppintunk) a kutyus szĂˇjĂˇhoz.
+ *     A vĂ©gĂ©n ĂˇtlĂ©pĂĽnk a REWARD kĂ©pernyĹ‘re (+1 arany jutalomcsont!).
  */
 const { GAME_DATA, phrase } = __require('data/gameData.js');
 const { renderPup } = __require('art/pupSvg.js');
@@ -4695,22 +4739,22 @@ function bathtubSvg(pupColor) {
         <stop offset="1" stop-color="#B3E5FC"/>
       </linearGradient>
     </defs>
-    <!-- kád hátsó pereme -->
+    <!-- kĂˇd hĂˇtsĂł pereme -->
     <ellipse cx="280" cy="86" rx="236" ry="38" fill="#B3E5FC" stroke="${O}" stroke-width="6"/>
     <ellipse cx="280" cy="92" rx="216" ry="28" fill="#4FC3F7"/>
-    <!-- kád teste -->
+    <!-- kĂˇd teste -->
     <path d="M44 86 L516 86 L484 218 Q470 254 420 254 L140 254 Q90 254 76 218 Z" fill="url(#tubBody)" stroke="${O}" stroke-width="6" stroke-linejoin="round"/>
-    <!-- habos perem elöl -->
+    <!-- habos perem elĂ¶l -->
     <g fill="#FFFFFF" stroke="#B3E5FC" stroke-width="3">
       <circle cx="96" cy="88" r="22"/><circle cx="136" cy="82" r="26"/><circle cx="182" cy="86" r="22"/>
       <circle cx="230" cy="82" r="25"/><circle cx="280" cy="84" r="28"/><circle cx="330" cy="82" r="25"/>
       <circle cx="378" cy="86" r="22"/><circle cx="424" cy="82" r="26"/><circle cx="464" cy="88" r="22"/>
     </g>
     <rect x="32" y="72" width="496" height="24" rx="12" fill="#FFFFFF" stroke="${O}" stroke-width="5"/>
-    <!-- tappancs dísz a kádon -->
+    <!-- tappancs dĂ­sz a kĂˇdon -->
     <circle cx="280" cy="172" r="36" fill="${pupColor}" stroke="${O}" stroke-width="4.5"/>
     <path d="M280 190 C280 190 260 176 260 165 C260 158 267 154 273 159 C277 162 280 166 280 166 C280 166 283 162 287 159 C293 154 300 158 300 165 C300 176 280 190 280 190 Z" fill="#FFF" stroke="${O}" stroke-width="3"/>
-    <!-- arany lábak -->
+    <!-- arany lĂˇbak -->
     <ellipse cx="128" cy="258" rx="26" ry="14" fill="#FFCA28" stroke="${O}" stroke-width="5"/>
     <ellipse cx="432" cy="258" rx="26" ry="14" fill="#FFCA28" stroke="${O}" stroke-width="5"/>
   </svg>`;
@@ -4775,7 +4819,7 @@ const careScreen = {
     ctx.root.innerHTML = `
       <div class="care-bg"></div>
       <div class="care-header">
-        <div class="care-title-badge" id="careTitleBadge">🐾 Kutyus-fürdető és Etető</div>
+        <div class="care-title-badge" id="careTitleBadge">đźľ Kutyus-fĂĽrdetĹ‘ Ă©s EtetĹ‘</div>
       </div>
       <div class="care-stage" id="careStage"></div>
     `;
@@ -4784,13 +4828,13 @@ const careScreen = {
     const titleEl = ctx.root.querySelector('#careTitleBadge');
     const particles = createParticleLayer(ctx.root, ctx.scope);
 
-    // 1. LÉPÉS: Kutyus kiválasztása
+    // 1. LĂ‰PĂ‰S: Kutyus kivĂˇlasztĂˇsa
     renderChooseStep();
 
     function renderChooseStep() {
-      titleEl.textContent = '🐾 Kutyus-fürdető: Kit fürdessünk meg?';
+      titleEl.textContent = 'đźľ Kutyus-fĂĽrdetĹ‘: Kit fĂĽrdessĂĽnk meg?';
       stageEl.innerHTML = `
-        <div class="care-cards" role="group" aria-label="Sáros kutyusok">
+        <div class="care-cards" role="group" aria-label="SĂˇros kutyusok">
           ${choices.map((p) => `
             <button
               type="button"
@@ -4810,7 +4854,7 @@ const careScreen = {
         </div>
       `;
 
-      speakHu(GAME_DATA.texts.careChoose);
+      speakHu(GAME_DATA.texts.careIntro);
 
       const cards = Array.from(stageEl.querySelectorAll('.care-pup-card'));
       cards.forEach((card) => {
@@ -4829,14 +4873,14 @@ const careScreen = {
       });
     }
 
-    // 2. & 3. LÉPÉS: Szappanozás → Öblítés → Etetés
+    // 2. & 3. LĂ‰PĂ‰S: SzappanozĂˇs â†’ Ă–blĂ­tĂ©s â†’ EtetĂ©s
     function renderBathAndFeedStep(pup) {
       const PUP_X = 683;
       const PUP_Y = 640;
       const SPONGE_HOME = { x: 270, y: 760 };
       const SHOWER_HOME = { x: 1096, y: 740 };
 
-      titleEl.textContent = `🛁 1. Szappanozás: Dörzsöld át ${pup.name}-t a szivaccsal!`;
+      titleEl.textContent = `đź› 1. SzappanozĂˇs: DĂ¶rzsĂ¶ld Ăˇt ${pup.name}-t a szivaccsal!`;
 
       stageEl.innerHTML = `
         <div class="mg-progress-bar" aria-hidden="true">
@@ -4858,7 +4902,7 @@ const careScreen = {
           class="care-tool care-tool--sponge is-active"
           id="careSpongeTool"
           style="left:${SPONGE_HOME.x}px; top:${SPONGE_HOME.y}px"
-          aria-label="Fürdető szivacs"
+          aria-label="FĂĽrdetĹ‘ szivacs"
         >
           ${spongeSvg()}
           <span class="care-tool__label">Szivacs</span>
@@ -4868,7 +4912,7 @@ const careScreen = {
           class="care-tool care-tool--shower is-hidden"
           id="careShowerTool"
           style="left:${SHOWER_HOME.x}px; top:${SHOWER_HOME.y}px"
-          aria-label="Zuhanyrózsa"
+          aria-label="ZuhanyrĂłzsa"
         >
           ${showerHeadSvg()}
           <span class="care-tool__label">Zuhany</span>
@@ -4878,7 +4922,7 @@ const careScreen = {
           <div class="care-treat" data-treat-idx="0" style="left:280px; top:760px" aria-label="Csont falatka">
             ${treatSvg('#FFCA28', 0)}
           </div>
-          <div class="care-treat" data-treat-idx="1" style="left:1086px; top:760px" aria-label="Szív falatka">
+          <div class="care-treat" data-treat-idx="1" style="left:1086px; top:760px" aria-label="SzĂ­v falatka">
             ${treatSvg(pup.color, 1)}
           </div>
         </div>
@@ -4924,9 +4968,9 @@ const careScreen = {
         },
       });
 
-      speakHu(phrase(GAME_DATA.texts.careScrub, pup), () => scaffold.start());
+      speakHu(phrase(GAME_DATA.texts.careSponge, pup), () => scaffold.start());
 
-      // --- 2A & 2B: Szivacs és Zuhany húzása / dörzsölése ---
+      // --- 2A & 2B: Szivacs Ă©s Zuhany hĂşzĂˇsa / dĂ¶rzsĂ¶lĂ©se ---
       let activeTool = null;
       trackPointer(ctx.scope, stageEl, {
         down(pt) {
@@ -5011,9 +5055,9 @@ const careScreen = {
         spongeEl.classList.add('is-hidden');
         showerEl.classList.remove('is-hidden');
         showerEl.classList.add('is-active');
-        titleEl.textContent = `🚿 2. Öblítés: Öblítsd le a habot ${pup.name}-ról!`;
+        titleEl.textContent = `đźšż 2. Ă–blĂ­tĂ©s: Ă–blĂ­tsd le a habot ${pup.name}-rĂłl!`;
         playChime();
-        speakHu(phrase(GAME_DATA.texts.careRinse, pup), () => scaffold.start());
+        speakHu(phrase(GAME_DATA.texts.careShower, pup), () => scaffold.start());
       }
 
       function advanceToFeed() {
@@ -5024,7 +5068,7 @@ const careScreen = {
         showerEl.classList.add('is-hidden');
         treatsLayer.classList.remove('is-hidden');
         pupWrap.classList.add('is-clean');
-        titleEl.textContent = `🦴 3. Etetés: Adj 2 finom falatkát ${pup.name}-nak!`;
+        titleEl.textContent = `đź¦´ 3. EtetĂ©s: Adj 2 finom falatkĂˇt ${pup.name}-nak!`;
         playSparkle();
         particles.emitSparkles(PUP_X, PUP_Y - 30, { count: 24, radius: 90 });
         speakHu(phrase(GAME_DATA.texts.careFeed, pup), () => scaffold.start());
