@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="hu">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Mancs Mentőakció">
+  <meta name="theme-color" content="#29B6F6">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" type="image/svg+xml" href="assets/icons/icon.svg">
+  <link rel="apple-touch-icon" href="assets/icons/icon.svg">
+  <title>Mancs Mentőakció</title>
+  <link rel="stylesheet" href="styles/main.css">
+</head>
+<body>
+  <div id="viewport">
+    <div id="stage">
+      <div id="screen-host"></div>
+      <div id="hud"></div>
+      <div id="caption" aria-live="polite"></div>
+    </div>
+  </div>
+  <script>
+    // Ha közvetlenül fájlként (file://) nyitják meg dupla kattintással, a böngésző
+    // CORS szabályai tiltják az ES modulokat -> ilyenkor a dist/bundle.js töltődik be.
+    // Webszerverről (http:// vagy https://) a natív ES modulok (src/main.js) futnak.
+    (function () {
+      var s = document.createElement('script');
+      if (location.protocol === 'file:') {
+        s.src = 'dist/bundle.js';
+      } else {
+        s.type = 'module';
+        s.src = 'src/main.js';
+      }
+      document.body.appendChild(s);
+    })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,20 @@
+{
+  "name": "Mancs Mentőakció – Fejlesztőjáték",
+  "short_name": "Mancs Mentő",
+  "description": "Interaktív, hangnarrált fejlesztőjáték 3 éves gyermeknek (13\" iPad Air).",
+  "lang": "hu",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "landscape",
+  "background_color": "#29B6F6",
+  "theme_color": "#29B6F6",
+  "icons": [
+    {
+      "src": "assets/icons/icon.svg",
+      "sizes": "192x192 512x512",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
